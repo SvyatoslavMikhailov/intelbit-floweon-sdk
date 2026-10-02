@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from typing import Any
 
-from river_sdk.connector import BasePlugin
+from floweon_sdk.connector import BasePlugin
 
 
 class NotifierPlugin(BasePlugin):

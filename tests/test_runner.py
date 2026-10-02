@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from river_sdk.runner import (
+from floweon_sdk.runner import (
     CircuitBreaker,
     PluginCallError,
     PluginDisabledError,
@@ -114,7 +114,7 @@ class TestPluginRunnerUnit:
 class TestPluginRunnerIntegration:
     async def test_happy_path_sync(self) -> None:
         runner = PluginRunner()
-        runner.start("river_sdk._test_echo.EchoPlugin")
+        runner.start("floweon_sdk._test_echo.EchoPlugin")
         try:
             result = await runner.call("echo", {"key": "value"})
             assert result == {"key": "value"}
@@ -123,7 +123,7 @@ class TestPluginRunnerIntegration:
 
     async def test_happy_path_async_method(self) -> None:
         runner = PluginRunner()
-        runner.start("river_sdk._test_echo.AsyncEchoPlugin")
+        runner.start("floweon_sdk._test_echo.AsyncEchoPlugin")
         try:
             result = await runner.call("echo", {"x": 1})
             assert result == {"x": 1}
@@ -132,7 +132,7 @@ class TestPluginRunnerIntegration:
 
     async def test_plugin_error_raises_call_error(self) -> None:
         runner = PluginRunner()
-        runner.start("river_sdk._test_echo.BrokenPlugin")
+        runner.start("floweon_sdk._test_echo.BrokenPlugin")
         try:
             with pytest.raises(PluginCallError, match="deliberate error"):
                 await runner.call("broken", {})
@@ -141,14 +141,14 @@ class TestPluginRunnerIntegration:
 
     async def test_timeout_raises_and_kills_process(self) -> None:
         runner = PluginRunner(config=PluginRunnerConfig(timeout_sec=1))
-        runner.start("river_sdk._test_echo.SlowPlugin")
+        runner.start("floweon_sdk._test_echo.SlowPlugin")
         with pytest.raises(PluginTimeoutError):
             await runner.call("slow", {})
         assert runner._process is None
 
     async def test_health_after_start(self) -> None:
         runner = PluginRunner()
-        runner.start("river_sdk._test_echo.EchoPlugin")
+        runner.start("floweon_sdk._test_echo.EchoPlugin")
         try:
             h = runner.health()
             assert h["alive"] is True
@@ -159,7 +159,7 @@ class TestPluginRunnerIntegration:
 
     async def test_stop_graceful(self) -> None:
         runner = PluginRunner()
-        runner.start("river_sdk._test_echo.EchoPlugin")
+        runner.start("floweon_sdk._test_echo.EchoPlugin")
         await runner.stop()
         assert runner._process is None
 
@@ -170,7 +170,7 @@ class TestPluginRunnerIntegration:
                 circuit_breaker_window_sec=300,
             )
         )
-        runner.start("river_sdk._test_echo.BrokenPlugin")
+        runner.start("floweon_sdk._test_echo.BrokenPlugin")
         try:
             for _ in range(3):
                 with pytest.raises(PluginCallError):
@@ -188,7 +188,7 @@ class TestPluginRunnerIntegration:
                 circuit_breaker_window_sec=300,
             )
         )
-        runner.start("river_sdk._test_echo.EchoPlugin")
+        runner.start("floweon_sdk._test_echo.EchoPlugin")
         # Принудительно открываем circuit breaker
         runner._circuit_breaker.record_failure()
         assert runner._circuit_breaker.is_open()

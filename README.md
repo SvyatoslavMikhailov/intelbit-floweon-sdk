@@ -1,8 +1,8 @@
-# intelbit-river-sdk
+# intelbit-floweon-sdk
 
-SDK разработчика плагинов платформы **Интелбит:Река** — базовые контракты для
+SDK разработчика плагинов платформы **Интелбит.Фловеон** — базовые контракты для
 **коннекторов**, **трансформеров** и **нотификаторов**, плюс runner для subprocess-изоляции
-плагинов. Пакет — `river_sdk`. Лицензия **Apache 2.0**.
+плагинов. Пакет — `floweon_sdk`. Лицензия **Apache 2.0**.
 
 ## Что внутри
 
@@ -24,10 +24,10 @@ SDK разработчика плагинов платформы **Интелб�
 ```toml
 # pyproject.toml потребителя
 [project]
-dependencies = ["intelbit-river-sdk"]
+dependencies = ["intelbit-floweon-sdk"]
 
 [tool.uv.sources]
-intelbit-river-sdk = { git = "https://github.com/SvyatoslavMikhailov/intelbit-river-sdk", tag = "v0.1.0" }
+intelbit-floweon-sdk = { git = "https://github.com/SvyatoslavMikhailov/intelbit-floweon-sdk", tag = "v0.2.0" }
 ```
 
 Ставится без токена и работает в форк-PR.
@@ -44,10 +44,10 @@ uv run pytest
 
 ## Происхождение
 
-Вынесено чистой копией из `intelbit-river-monorepo/packages/sdk` (v0.0.1) в отдельный
+Вынесено чистой копией из `intelbit-floweon-monorepo/packages/sdk` (v0.0.1) в отдельный
 публичный репозиторий — чтобы экосистема видела SDK, а коннекторы ставили его без доступа
 к приватному монорепо. История монорепо не переносилась.
 
 ## Roadmap
 
-- Публикация на **PyPI** (`pip install intelbit-river-sdk`) — отдельный будущий шаг.
+- Публикация на **PyPI** (`pip install intelbit-floweon-sdk`) — отдельный будущий шаг.

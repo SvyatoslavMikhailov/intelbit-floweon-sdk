@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
-from river_sdk.manifest import PluginManifest
+from floweon_sdk.manifest import PluginManifest
 
 
 class PluginContext:

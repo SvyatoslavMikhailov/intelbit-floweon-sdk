@@ -1,18 +1,21 @@
-# CLAUDE.md — intelbit-river-sdk
+# CLAUDE.md — intelbit-floweon-sdk
 
 Гайд для Claude Code по этому репозиторию.
 
 ## Что это
 
-Публичный (Apache 2.0) SDK разработчика плагинов Интелбит:Река. Пакет `river_sdk`.
+Публичный (Apache 2.0) SDK разработчика плагинов Интелбит.Фловеон. Пакет `floweon_sdk`.
 Базовые контракты `ConnectorPlugin`/`TransformerPlugin`/`NotifierPlugin`, `PluginManifest`,
 `PluginRunner` (subprocess-изоляция, circuit breaker). Вынесен чистой копией из
-`intelbit-river-monorepo/packages/sdk`.
+`intelbit-floweon-monorepo/packages/sdk`.
+
+Проектная документация — Obsidian, папка `4 Мои проекты/4-17 Интелбит Фловеон/`;
+промпты — `04 Промпты для Claude Code/`, статус — `04 Промпты для Claude Code/Статус разработки.md`.
 
 ## Важно
 
 - ==Публичный контракт SDK не менять без необходимости== — на него завязаны коннекторы
-  (onec, ozon, bitrix24) и ядро монорепо (`river_core`). Это инструмент экосистемы.
+  (onec, ozon, bitrix24) и ядро монорепо (`floweon_core`). Это инструмент экосистемы.
 - Контракт плагина — ADR-006: subprocess-изоляция, соединения не держим между вызовами,
   методы idempotent.
 - Зависимость минимальна — только `pydantic>=2.9`. Не добавлять тяжёлых зависимостей.
@@ -29,7 +32,7 @@ uv run pytest
 
 ## Дистрибуция
 
-На старте — публичный git-тег (`v0.1.0`) через `[tool.uv.sources]`. PyPI — будущий шаг.
+На старте — публичный git-тег (`v0.2.0`; до переименования — `v0.1.0` с пакетом `river_sdk`) через `[tool.uv.sources]`. PyPI — будущий шаг.
 
 ---
 

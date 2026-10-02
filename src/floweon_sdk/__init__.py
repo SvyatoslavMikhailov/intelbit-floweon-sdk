@@ -1,9 +1,9 @@
-__version__ = "0.0.1"
+__version__ = "0.2.0"
 
-from river_sdk.connector import ConnectorPlugin
-from river_sdk.manifest import PluginManifest, PluginType
-from river_sdk.notifier import NotifierPlugin
-from river_sdk.runner import (
+from floweon_sdk.connector import ConnectorPlugin
+from floweon_sdk.manifest import PluginManifest, PluginType
+from floweon_sdk.notifier import NotifierPlugin
+from floweon_sdk.runner import (
     CircuitBreaker,
     PluginCallError,
     PluginDisabledError,
@@ -11,7 +11,7 @@ from river_sdk.runner import (
     PluginRunnerConfig,
     PluginTimeoutError,
 )
-from river_sdk.transformer import TransformerPlugin
+from floweon_sdk.transformer import TransformerPlugin
 
 __all__ = [
     "CircuitBreaker",
