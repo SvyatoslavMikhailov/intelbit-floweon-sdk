@@ -2,6 +2,16 @@
 
 Плагин-разработчик не работает с этим напрямую — он реализует ConnectorPlugin/
 TransformerPlugin/NotifierPlugin, а PluginRunner запускает его в child-process.
+
+v0.3.0:
+- в дочернем процессе — один долгоживущий event loop (поток), а не asyncio.run
+  на каждый вызов: состояние клиента плагина (rate limiter, сессии) живёт между
+  вызовами;
+- конкурентные вызовы с correlation id: семафор `max_concurrency` и отдельная
+  «быстрая полоса» (`fast_methods`, по умолчанию subscribe/health) — приём
+  вебхука не ждёт долгую запись каталога;
+- circuit breaker с half-open: после `cooldown_sec` пропускается пробный вызов,
+  успех закрывает breaker.
 """
 
 import asyncio
@@ -9,7 +19,9 @@ import importlib
 import json
 import multiprocessing
 import queue
+import threading
 import time
+import uuid
 from typing import Any
 
 from pydantic import BaseModel
@@ -22,6 +34,12 @@ class PluginRunnerConfig(BaseModel):
     memory_mb: int = 512
     circuit_breaker_failures: int = 5
     circuit_breaker_window_sec: int = 300
+    # Через сколько секунд открытый breaker пропускает пробный вызов (half-open).
+    cooldown_sec: float = 30.0
+    # Одновременных вызовов обычной полосы в дочернем процессе.
+    max_concurrency: int = 4
+    # Методы быстрой полосы — без очереди за обычными вызовами.
+    fast_methods: tuple[str, ...] = ("subscribe", "health", "health_check")
 
 
 class PluginTimeoutError(RuntimeError):
@@ -37,32 +55,73 @@ class PluginCallError(RuntimeError):
 
 
 class CircuitBreaker:
-    """Окно ошибок с автоматическим отключением плагина при превышении порога."""
+    """Окно ошибок с отключением плагина и half-open восстановлением.
 
-    def __init__(self, max_failures: int, window_sec: int) -> None:
+    closed → (max_failures в окне) → open → (cooldown_sec) → half_open: один
+    пробный вызов; успех → closed, ошибка → снова open.
+    """
+
+    def __init__(self, max_failures: int, window_sec: int, cooldown_sec: float = 30.0) -> None:
         self._max_failures = max_failures
         self._window_sec = window_sec
+        self._cooldown_sec = cooldown_sec
         self._failures: list[float] = []
         self._disabled = False
+        self._opened_at = 0.0
+        self._probing = False
 
     def record_failure(self) -> None:
         now = time.monotonic()
+        if self._disabled or self._probing:
+            # Пробный вызов не удался — снова open на полный cooldown.
+            self._disabled = True
+            self._probing = False
+            self._opened_at = now
+            return
         self._failures = [t for t in self._failures if now - t < self._window_sec]
         self._failures.append(now)
         if len(self._failures) >= self._max_failures:
             self._disabled = True
+            self._opened_at = now
+
+    def record_success(self) -> None:
+        if self._probing or self._disabled:
+            self.reset()
 
     def is_open(self) -> bool:
-        return self._disabled
+        """True — вызов запрещён. После cooldown один вызов пропускается (half-open)."""
+        if not self._disabled:
+            return False
+        if self._probing:
+            return True  # пробный вызов уже в полёте
+        if time.monotonic() - self._opened_at >= self._cooldown_sec:
+            self._probing = True
+            return False
+        return True
+
+    @property
+    def state(self) -> str:
+        if not self._disabled:
+            return "closed"
+        if self._probing or time.monotonic() - self._opened_at >= self._cooldown_sec:
+            return "half_open"
+        return "open"
 
     def reset(self) -> None:
         self._failures.clear()
         self._disabled = False
+        self._probing = False
+        self._opened_at = 0.0
 
     @property
     def failures_count(self) -> int:
         now = time.monotonic()
         return len([t for t in self._failures if now - t < self._window_sec])
+
+
+# --------------------------------------------------------------------------- #
+# Дочерний процесс
+# --------------------------------------------------------------------------- #
 
 
 def _plugin_worker(
@@ -71,11 +130,14 @@ def _plugin_worker(
     request_queue: "multiprocessing.Queue[str]",
     response_queue: "multiprocessing.Queue[str]",
     memory_mb: int,
+    max_concurrency: int = 4,
+    fast_methods: tuple[str, ...] = (),
 ) -> None:
-    """Worker, выполняющийся в дочернем процессе.
+    """Worker дочернего процесса.
 
-    IPC-протокол: JSON-строки через multiprocessing.Queue.
-    pickle запрещён на уровне приложения — все данные сериализуются в JSON.
+    IPC: JSON-строки через multiprocessing.Queue (pickle запрещён на уровне
+    приложения). Запрос {id, method, payload} → ответ {id, result|error}.
+    Плагин живёт в одном event loop (отдельный поток) весь срок процесса.
     """
     try:
         import resource as _resource
@@ -85,38 +147,130 @@ def _plugin_worker(
     except Exception:
         pass
 
-    try:
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+
+    async def build() -> Any:
         module_path, class_name = class_path.rsplit(".", 1)
-        module = importlib.import_module(module_path)
-        plugin_cls = getattr(module, class_name)
-        plugin = plugin_cls(**init_kwargs)
+        plugin_cls = getattr(importlib.import_module(module_path), class_name)
+        return plugin_cls(**init_kwargs)
+
+    try:
+        # Плагин создаётся внутри loop: его asyncio-примитивы привязаны к нему.
+        plugin = asyncio.run_coroutine_threadsafe(build(), loop).result()
     except Exception as e:
-        response_queue.put(json.dumps({"error": f"Failed to load plugin: {e}"}))
+        response_queue.put(json.dumps({"id": None, "error": f"Failed to load plugin: {e}"}))
         return
+
+    async def make_semaphores() -> tuple[asyncio.Semaphore, asyncio.Semaphore]:
+        size = max(1, max_concurrency)
+        return asyncio.Semaphore(size), asyncio.Semaphore(size)
+
+    normal_lane, fast_lane = asyncio.run_coroutine_threadsafe(make_semaphores(), loop).result()
+
+    async def handle(request_id: str, method_name: str, payload: dict[str, Any]) -> None:
+        lane = fast_lane if method_name in fast_methods else normal_lane
+        try:
+            async with lane:
+                method = getattr(plugin, method_name)
+                if asyncio.iscoroutinefunction(method):
+                    result: Any = await method(payload)
+                else:
+                    result = await asyncio.get_running_loop().run_in_executor(None, method, payload)
+            json.dumps(result)  # проверяем JSON-сериализуемость
+            message = {"id": request_id, "result": result if result is not None else {}}
+        except Exception as e:
+            message = {"id": request_id, "error": str(e)}
+        response_queue.put(json.dumps(message))
 
     while True:
         try:
             raw = request_queue.get()
             request = json.loads(raw)
         except Exception as e:
-            response_queue.put(json.dumps({"error": f"IPC parse error: {e}"}))
+            response_queue.put(json.dumps({"id": None, "error": f"IPC parse error: {e}"}))
             continue
 
         method_name: str = request.get("method", "")
         if method_name == "__poison__":
             break
+        asyncio.run_coroutine_threadsafe(
+            handle(str(request.get("id")), method_name, request.get("payload", {})), loop
+        )
 
-        payload: dict[str, Any] = request.get("payload", {})
-        try:
-            method = getattr(plugin, method_name)
-            if asyncio.iscoroutinefunction(method):
-                result: Any = asyncio.run(method(payload))
+    loop.call_soon_threadsafe(loop.stop)
+
+
+# --------------------------------------------------------------------------- #
+# Родительская сторона
+# --------------------------------------------------------------------------- #
+
+
+class _Generation:
+    """Один запущенный дочерний процесс: очереди, поток чтения ответов, ожидающие вызовы."""
+
+    def __init__(self, process: multiprocessing.Process, requests: Any, responses: Any) -> None:
+        self.process = process
+        self.requests = requests
+        self.responses = responses
+        self.pending: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Future[Any]]] = {}
+        self.lock = threading.Lock()
+        self.stopped = threading.Event()
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+
+    def register(self, request_id: str) -> asyncio.Future[Any]:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+        with self.lock:
+            self.pending[request_id] = (loop, future)
+        return future
+
+    def forget(self, request_id: str) -> None:
+        with self.lock:
+            self.pending.pop(request_id, None)
+
+    def _deliver(self, request_id: str | None, message: dict[str, Any]) -> None:
+        with self.lock:
+            if request_id is None:
+                # Ошибка загрузки плагина / IPC — относится ко всем ожидающим.
+                targets = list(self.pending.values())
+                self.pending.clear()
             else:
-                result = method(payload)
-            json.dumps(result)  # проверяем JSON-сериализуемость
-            response_queue.put(json.dumps({"result": result if result is not None else {}}))
-        except Exception as e:
-            response_queue.put(json.dumps({"error": str(e)}))
+                entry = self.pending.pop(request_id, None)
+                targets = [entry] if entry else []
+        for loop, future in targets:
+            loop.call_soon_threadsafe(_resolve, future, message)
+
+    def _read(self) -> None:
+        while not self.stopped.is_set():
+            try:
+                raw = self.responses.get(True, 0.2)
+            except queue.Empty:
+                if not self.process.is_alive():
+                    # Процесс умер без ответа (краш, OOM) — ожидающие не должны висеть.
+                    self.fail_all("plugin process died")
+                    return
+                continue
+            except (EOFError, OSError):
+                return
+            message = json.loads(raw)
+            self._deliver(message.get("id"), message)
+
+    def fail_all(self, reason: str) -> None:
+        with self.lock:
+            targets = list(self.pending.values())
+            self.pending.clear()
+        for loop, future in targets:
+            loop.call_soon_threadsafe(_resolve, future, {"error": reason})
+
+    def stop(self) -> None:
+        self.stopped.set()
+
+
+def _resolve(future: asyncio.Future[Any], message: dict[str, Any]) -> None:
+    if not future.done():
+        future.set_result(message)
 
 
 class PluginRunner:
@@ -127,16 +281,16 @@ class PluginRunner:
         self._process: multiprocessing.Process | None = None
         self._request_queue: multiprocessing.Queue[str] | None = None
         self._response_queue: multiprocessing.Queue[str] | None = None
+        self._generation: _Generation | None = None
         self._circuit_breaker = CircuitBreaker(
             self._config.circuit_breaker_failures,
             self._config.circuit_breaker_window_sec,
+            self._config.cooldown_sec,
         )
+        self._last_error: str | None = None
         # Параметры запуска — для ленивого respawn после timeout/краша.
         self._class_path: str | None = None
         self._init_kwargs: dict[str, Any] = {}
-        # Сериализует call(): один request/response queue без correlation_id,
-        # параллельные вызовы иначе перемешивают ответы между корутинами.
-        self._call_lock = asyncio.Lock()
 
     def start(self, plugin_class_path: str, init_kwargs: dict[str, Any] | None = None) -> None:
         """Запустить дочерний процесс с плагином.
@@ -158,14 +312,17 @@ class PluginRunner:
                 self._request_queue,
                 self._response_queue,
                 self._config.memory_mb,
+                self._config.max_concurrency,
+                tuple(self._config.fast_methods),
             ),
             daemon=True,
         )
         self._process = proc
         proc.start()
+        self._generation = _Generation(proc, self._request_queue, self._response_queue)
 
     async def call(self, method_name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """Вызвать метод плагина через IPC.
+        """Вызвать метод плагина через IPC (вызовы могут идти параллельно).
 
         Payload должен быть JSON-сериализуемым (не pickle-объекты).
 
@@ -179,44 +336,47 @@ class PluginRunner:
         if self._circuit_breaker.is_open():
             raise PluginDisabledError("Plugin circuit breaker is open")
 
+        request_id = uuid.uuid4().hex
         # JSON-валидация payload — предотвращает передачу произвольных pickle-объектов.
-        # Вне lock: ошибка сериализации не должна занимать слот вызова.
-        request_json = json.dumps({"method": method_name, "payload": payload})
+        request_json = json.dumps({"id": request_id, "method": method_name, "payload": payload})
 
-        async with self._call_lock:
-            self._ensure_running()
-            assert self._request_queue is not None and self._response_queue is not None
+        self._ensure_running()
+        generation = self._generation
+        assert generation is not None and self._request_queue is not None
+        future = generation.register(request_id)
+        self._request_queue.put(request_json)
 
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._request_queue.put, request_json)
-
-            try:
-                # get(timeout=...) с собственным таймаутом, НЕ asyncio.wait_for поверх
-                # бесконечного get: иначе отмена future оставляла бы поток executor
-                # вечно заблокированным на queue.get() → утечка потока и зависание
-                # интерпретатора на teardown (поток не daemon).
-                raw = await loop.run_in_executor(
-                    None, self._response_queue.get, True, self._config.timeout_sec
-                )
-            except queue.Empty:
-                # Процесс мог зависнуть на этом запросе — убиваем. Очереди обнуляем,
-                # чтобы запоздавший ответ не попал в следующий вызов; respawn ленивый.
-                if self._process is not None:
-                    self._process.terminate()
-                self._process = None
-                self._request_queue = None
-                self._response_queue = None
-                self._circuit_breaker.record_failure()
-                raise PluginTimeoutError(
-                    f"Plugin method {method_name!r} timed out after {self._config.timeout_sec}s"
-                ) from None
-
-        result = json.loads(raw)
-        if "error" in result:
+        try:
+            message = await asyncio.wait_for(future, timeout=self._config.timeout_sec)
+        except TimeoutError:
+            generation.forget(request_id)
+            # Зависший вызов держит слот — процесс перезапускается; остальным
+            # вызовам этого процесса сообщается об ошибке, respawn ленивый.
+            self._kill("plugin restarted after timeout")
             self._circuit_breaker.record_failure()
-            raise PluginCallError(result["error"])
+            self._last_error = f"timeout in {method_name}"
+            raise PluginTimeoutError(
+                f"Plugin method {method_name!r} timed out after {self._config.timeout_sec}s"
+            ) from None
 
-        return result.get("result", {})  # type: ignore[no-any-return]
+        if "error" in message:
+            self._circuit_breaker.record_failure()
+            self._last_error = str(message["error"])[:500]
+            raise PluginCallError(message["error"])
+
+        self._circuit_breaker.record_success()
+        return message.get("result", {})  # type: ignore[no-any-return]
+
+    def _kill(self, reason: str) -> None:
+        if self._generation is not None:
+            self._generation.stop()
+            self._generation.fail_all(reason)
+        if self._process is not None:
+            self._process.terminate()
+        self._process = None
+        self._request_queue = None
+        self._response_queue = None
+        self._generation = None
 
     def _ensure_running(self) -> None:
         """Гарантировать живой subprocess: respawn после timeout/краша.
@@ -228,6 +388,8 @@ class PluginRunner:
             return
         if self._class_path is None:
             raise RuntimeError("PluginRunner is not started; call start() first")
+        if self._generation is not None:
+            self._generation.stop()
         # Перезапуск после timeout/краша — иначе один timeout убивал плагин навсегда.
         self.start(self._class_path, self._init_kwargs)
 
@@ -238,13 +400,18 @@ class PluginRunner:
         try:
             if self._request_queue is not None:
                 self._request_queue.put(json.dumps({"method": "__poison__", "payload": {}}))
-            self._process.join(timeout=5)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._process.join, 5)
             if self._process.is_alive():
                 self._process.terminate()
         finally:
+            if self._generation is not None:
+                self._generation.stop()
+                self._generation.fail_all("plugin stopped")
             self._process = None
             self._request_queue = None
             self._response_queue = None
+            self._generation = None
 
     def health(self) -> dict[str, Any]:
         """Статус плагина для admin-UI и мониторинга."""
@@ -252,8 +419,10 @@ class PluginRunner:
         return {
             "alive": alive,
             "failures_count": self._circuit_breaker.failures_count,
-            "disabled": self._circuit_breaker.is_open(),
-            "last_error": None,
+            "disabled": self._circuit_breaker.state == "open",
+            "breaker": self._circuit_breaker.state,
+            "in_flight": len(self._generation.pending) if self._generation else 0,
+            "last_error": self._last_error,
         }
 
     def reset_circuit_breaker(self) -> None:

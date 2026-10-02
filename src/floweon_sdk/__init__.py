@@ -1,6 +1,7 @@
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from floweon_sdk.connector import ConnectorPlugin
+from floweon_sdk.entrypoint import PluginEntrypoint
 from floweon_sdk.manifest import PluginManifest, PluginType
 from floweon_sdk.notifier import NotifierPlugin
 from floweon_sdk.runner import (
@@ -19,6 +20,7 @@ __all__ = [
     "NotifierPlugin",
     "PluginCallError",
     "PluginDisabledError",
+    "PluginEntrypoint",
     "PluginManifest",
     "PluginRunner",
     "PluginRunnerConfig",

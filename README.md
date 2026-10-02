@@ -12,7 +12,8 @@ SDK разработчика плагинов платформы **Интелб�
 | `transformer` | `TransformerPlugin` |
 | `notifier` | `NotifierPlugin` |
 | `manifest` | `PluginManifest`, `PluginType` |
-| `runner` | `PluginRunner`, circuit breaker, ошибки вызова/таймаута |
+| `runner` | `PluginRunner` (долгоживущий loop, конкурентные вызовы, быстрая полоса), circuit breaker с half-open, ошибки вызова/таймаута |
+| `entrypoint` | `PluginEntrypoint` — запуск ConnectorPlugin ядром (`cls(config)`, ошибки данными) |
 
 Контракт плагина — ADR-006 (subprocess-изоляция): плагин может быть убит в любой момент;
 соединения между вызовами не держим; методы idempotent.

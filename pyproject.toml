@@ -1,6 +1,6 @@
 [project]
 name = "intelbit-floweon-sdk"
-version = "0.2.0"
+version = "0.3.0"
 description = "SDK для разработчиков плагинов Интелбит.Фловеон (Connector / Transformer / Notifier)"
 license = { text = "Apache-2.0" }
 authors = [{ name = "ООО Интелбит", email = "vceo@intelbit.ru" }]
