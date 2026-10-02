@@ -131,6 +131,30 @@ class PluginEntrypoint:
             return _error(exc)
         return dict(_jsonable(result))
 
+    async def notify(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """NotifierPlugin.notify; ошибка канала — данными (как у read/write)."""
+        try:
+            result = await self._connector.notify(dict(payload))
+        except Exception as exc:
+            return _error(exc)
+        return dict(_jsonable(result))
+
+    async def status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """NotifierPlugin.status(external_id)."""
+        try:
+            result = await self._connector.status(str(payload.get("external_id", "")))
+        except Exception as exc:
+            return _error(exc)
+        return dict(_jsonable(result))
+
+    async def find(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """NotifierPlugin.find(dedup_key) — поиск ранее созданной сущности."""
+        try:
+            result = await self._connector.find(str(payload.get("dedup_key", "")))
+        except Exception as exc:
+            return _error(exc)
+        return dict(_jsonable(result))
+
     async def subscribe(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Валидировать входящий вебхук → {"accepted": bool, ...}; никогда не бросает."""
         subscribe = getattr(self._connector, "subscribe", None)

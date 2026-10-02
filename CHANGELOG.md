@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.1] — 2026-10-02
+
+### Добавлено
+
+- `NotifierPlugin.notify(notification) -> NotifyResult`: структурированное уведомление
+  (`kind`, `dedup_key`, `title`, `body`, `severity`, `route {responsible_id, group_id,
+  deadline_hours}`, `mode create|comment|send`, `external_id`, `crm_binding`, `context`);
+  ответ `{action: created|commented|sent|skipped, external_id}`. Режим (создать задачу или
+  дописать комментарий) выбирает ядро по своей дедупликации.
+- `NotifierPlugin.status(external_id) -> {"open": bool}` — закрыта ли внешняя сущность.
+- `NotifierPlugin.find(dedup_key) -> {"external_id"}` — ранее созданная открытая сущность
+  для ключа: создание идемпотентно при потерянном ответе (таймаут, 5xx прокси).
+- `PluginEntrypoint.notify/status/find` — ошибки канала данными `_error` (как у read/write).
+- Типы `Notification`, `NotificationRoute`, `NotifyResult`.
+
+### Устарело
+
+- `NotifierPlugin.send(recipient, message)` — обёртка над `notify(mode=send)` с
+  `DeprecationWarning`.
+
 ## [0.3.0] — 2026-10-02
 
 ### Изменено

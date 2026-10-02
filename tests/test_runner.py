@@ -403,3 +403,40 @@ class TestEntrypointWriteRetrySafety:
         assert _error(ReadTimeout("x"))["_error"]["retry_safe_write"] is False
         assert _error(Gateway("x"))["_error"]["retry_safe_write"] is False
         assert _error(Gateway("x"))["_error"]["transient"] is True
+
+
+class TestNotifierContract:
+    async def test_send_is_deprecated_wrapper(self) -> None:
+        from floweon_sdk.notifier import NotifierPlugin
+
+        class Plugin(NotifierPlugin):
+            def __init__(self) -> None:
+                self.seen: list[dict[str, object]] = []
+
+            async def start(self) -> None: ...
+
+            async def stop(self) -> None: ...
+
+            async def notify(self, notification):  # type: ignore[no-untyped-def]
+                self.seen.append(dict(notification))
+                return {"action": "sent"}
+
+        plugin = Plugin()
+        with pytest.warns(DeprecationWarning):
+            assert await plugin.send("42", "Текст") is True
+        assert plugin.seen[0]["route"] == {"responsible_id": "42"}
+        assert await plugin.status("1") == {"open": True}
+
+    async def test_entrypoint_notify_and_status(self) -> None:
+        from floweon_sdk.entrypoint import PluginEntrypoint
+
+        entry = PluginEntrypoint("floweon_sdk._test_connector:EchoNotifier", {"closed": ["5"]})
+        assert await entry.notify({"mode": "create", "title": "x"}) == {
+            "action": "created",
+            "external_id": "7",
+        }
+        assert await entry.status({"external_id": "5"}) == {"open": False}
+        assert await entry.find({"dedup_key": "known"}) == {"external_id": "7"}
+        assert await entry.find({"dedup_key": "other"}) == {"external_id": None}
+        error = await entry.notify({"title": "boom"})
+        assert error["_error"]["transient"] is True
