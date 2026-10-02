@@ -94,3 +94,18 @@ class CrashPlugin:
         import os
 
         os._exit(1)
+
+
+class MixedPlugin:
+    """Зависающий метод и быстрый — тест таймаута одного вызова среди параллельных."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        pass
+
+    async def hang(self, payload: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(9999)
+        return {}
+
+    async def work(self, payload: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(float(payload.get("sleep", 0)))
+        return {"ok": True}

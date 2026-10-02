@@ -15,12 +15,17 @@
   (`closed|open|half_open`), `in_flight`, `last_error`.
 - Смерть дочернего процесса без ответа (краш, OOM) завершает ожидающие вызовы ошибкой,
   а не таймаутом.
+- Перезапуск процесса (таймаут одного вызова, падение) завершает остальные вызовы в полёте
+  `PluginRestartedError` (результат неизвестен) и засчитывается в breaker один раз;
+  прерванный пробный вызов half-open (отмена, невалидный payload) не оставляет breaker
+  в half-open.
 
 ### Добавлено
 
 - `PluginEntrypoint` (`floweon_sdk.entrypoint`): контракт запуска ConnectorPlugin ядром —
   `cls(config)`, `read/write/subscribe/health/start/stop` с одним JSON-аргументом, ошибки
-  коннектора возвращаются данными `{"_error": {type, message, transient}}` (не открывают
+  коннектора возвращаются данными `{"_error": {type, message, transient, retry_safe_write}}`
+  (`retry_safe_write` — запрос заведомо не дошёл: повтор записи безопасен; не открывают
   circuit breaker), отказ вебхука — `{"accepted": false, "status": 401|400}`.
   Перенесён из ядра Фловеона (`ConnectorAdapter`).
 

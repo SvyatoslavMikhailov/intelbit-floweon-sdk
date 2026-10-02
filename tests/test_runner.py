@@ -314,3 +314,92 @@ class TestPluginEntrypoint:
             assert runner.health()["failures_count"] == 0  # бизнес-ошибка — не сбой плагина
         finally:
             await runner.stop()
+
+
+@pytest.mark.asyncio
+class TestReviewFixes:
+    async def test_cancelled_probe_does_not_stick_half_open(self) -> None:
+        import asyncio
+
+        runner = PluginRunner(
+            config=PluginRunnerConfig(circuit_breaker_failures=1, cooldown_sec=0.2)
+        )
+        runner.start("floweon_sdk._test_echo.MixedPlugin")
+        try:
+            runner._circuit_breaker.record_failure()  # открыть
+            await asyncio.sleep(0.25)
+            probe = asyncio.create_task(runner.call("work", {"sleep": 5}))
+            await asyncio.sleep(0.3)
+            probe.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await probe
+            assert not runner._circuit_breaker.probing
+            # Следующий вызов снова становится пробой и закрывает breaker.
+            assert await runner.call("work", {}) == {"ok": True}
+            assert runner.health()["breaker"] == "closed"
+        finally:
+            await runner.stop()
+
+    async def test_invalid_payload_does_not_consume_probe(self) -> None:
+        import asyncio
+
+        runner = PluginRunner(
+            config=PluginRunnerConfig(circuit_breaker_failures=1, cooldown_sec=0.05)
+        )
+        runner.start("floweon_sdk._test_echo.MixedPlugin")
+        try:
+            runner._circuit_breaker.record_failure()
+            await asyncio.sleep(0.06)
+            with pytest.raises(TypeError):
+                await runner.call("work", {"obj": object()})  # type: ignore[dict-item]
+            assert not runner._circuit_breaker.probing
+            assert await runner.call("work", {}) == {"ok": True}
+        finally:
+            await runner.stop()
+
+    async def test_timeout_restarts_others_without_opening_breaker(self) -> None:
+        import asyncio
+
+        from floweon_sdk.runner import PluginRestartedError
+
+        runner = PluginRunner(config=PluginRunnerConfig(timeout_sec=1, circuit_breaker_failures=2))
+        runner.start("floweon_sdk._test_echo.MixedPlugin")
+        try:
+            await runner.call("work", {})
+            hang = asyncio.create_task(runner.call("hang", {}))
+            await asyncio.sleep(0.5)  # чужие вызовы в полёте к моменту таймаута hang
+            others = [asyncio.create_task(runner.call("work", {"sleep": 3})) for _ in range(3)]
+            with pytest.raises(PluginTimeoutError):
+                await hang
+            for task in others:
+                with pytest.raises(PluginRestartedError):
+                    await task
+            # Один сбой (таймаут), не по сбою на каждый чужой вызов.
+            assert runner._circuit_breaker.failures_count == 1
+            assert runner.health()["breaker"] == "closed"
+            assert await runner.call("work", {}) == {"ok": True}  # respawn
+        finally:
+            await runner.stop()
+
+
+class TestEntrypointWriteRetrySafety:
+    def test_classification(self) -> None:
+        from floweon_sdk.entrypoint import _error
+
+        class ConnectError(Exception):
+            pass
+
+        class ReadTimeout(Exception):  # noqa: N818
+            pass
+
+        class Gateway(Exception):  # noqa: N818
+            status_code = 503
+
+        class Limited(Exception):  # noqa: N818
+            status_code = 429
+
+        assert _error(ConnectError("x"))["_error"]["retry_safe_write"] is True
+        assert _error(Limited("x"))["_error"]["retry_safe_write"] is True
+        assert _error(ReadTimeout("x"))["_error"]["retry_safe_write"] is False
+        assert _error(Gateway("x"))["_error"]["retry_safe_write"] is False
+        assert _error(Gateway("x"))["_error"]["transient"] is True

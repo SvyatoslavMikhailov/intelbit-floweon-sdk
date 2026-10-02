@@ -55,6 +55,22 @@ def _is_transient(exc: Exception) -> bool:
     return any(type(c).__name__.endswith(_TRANSIENT_NAMES) for c in (exc, exc.__cause__) if c)
 
 
+_NOT_DELIVERED_NAMES = ("ConnectError", "ConnectionRefusedError", "QueryLimitExceeded")
+
+
+def _not_delivered(exc: Exception) -> bool:
+    """Запрос заведомо не дошёл до внешней системы — повтор записи безопасен.
+
+    Таймаут и 5xx сюда не входят: запись могла выполниться (контрагент создан, ответ
+    потерян), и повтор дал бы дубль или ложный отказ «уже существует».
+    """
+    if isinstance(exc, ConnectionRefusedError):
+        return True
+    if getattr(exc, "status_code", None) == 429:
+        return True
+    return any(type(c).__name__.endswith(_NOT_DELIVERED_NAMES) for c in (exc, exc.__cause__) if c)
+
+
 def _error(exc: Exception) -> dict[str, Any]:
     """Ошибка коннектора → данные: исключение в PluginRunner считалось бы сбоем
     для circuit breaker, и бизнес-отказы (дубль контрагента) выключили бы коннектор."""
@@ -63,6 +79,8 @@ def _error(exc: Exception) -> dict[str, Any]:
             "type": type(exc).__name__,
             "message": str(exc)[:2000],
             "transient": _is_transient(exc),
+            # Для write: повтор безопасен только если запрос не дошёл.
+            "retry_safe_write": _not_delivered(exc),
         }
     }
 

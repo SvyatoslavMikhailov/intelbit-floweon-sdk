@@ -54,6 +54,15 @@ class PluginCallError(RuntimeError):
     """Плагин вернул ошибку."""
 
 
+class PluginRestartedError(PluginCallError):
+    """Процесс плагина перезапущен (таймаут чужого вызова или падение) во время вызова.
+
+    Результат вызова неизвестен: запрос мог быть исполнен частично. Вызывающая
+    сторона решает, безопасен ли повтор (чтение — да, запись — нет). В circuit
+    breaker не засчитывается — сбой уже учтён один раз.
+    """
+
+
 class CircuitBreaker:
     """Окно ошибок с отключением плагина и half-open восстановлением.
 
@@ -83,6 +92,18 @@ class CircuitBreaker:
         if len(self._failures) >= self._max_failures:
             self._disabled = True
             self._opened_at = now
+
+    def abort_probe(self) -> None:
+        """Пробный вызов не дал результата (отмена, ошибка до отправки) — снять флаг пробы.
+
+        Breaker остаётся открытым; следующий вызов после cooldown снова станет пробой.
+        Без этого прерванная проба навсегда оставляла бы breaker в half-open.
+        """
+        self._probing = False
+
+    @property
+    def probing(self) -> bool:
+        return self._probing
 
     def record_success(self) -> None:
         if self._probing or self._disabled:
@@ -209,7 +230,14 @@ def _plugin_worker(
 class _Generation:
     """Один запущенный дочерний процесс: очереди, поток чтения ответов, ожидающие вызовы."""
 
-    def __init__(self, process: multiprocessing.Process, requests: Any, responses: Any) -> None:
+    def __init__(
+        self,
+        process: multiprocessing.Process,
+        requests: Any,
+        responses: Any,
+        on_death: Any = None,
+    ) -> None:
+        self.on_death = on_death
         self.process = process
         self.requests = requests
         self.responses = responses
@@ -249,6 +277,9 @@ class _Generation:
             except queue.Empty:
                 if not self.process.is_alive():
                     # Процесс умер без ответа (краш, OOM) — ожидающие не должны висеть.
+                    # Один сбой на падение процесса, а не по сбою на каждый вызов в полёте.
+                    if self.on_death is not None and self.pending:
+                        self.on_death()
                     self.fail_all("plugin process died")
                     return
                 continue
@@ -262,7 +293,7 @@ class _Generation:
             targets = list(self.pending.values())
             self.pending.clear()
         for loop, future in targets:
-            loop.call_soon_threadsafe(_resolve, future, {"error": reason})
+            loop.call_soon_threadsafe(_resolve, future, {"error": reason, "restarted": True})
 
     def stop(self) -> None:
         self.stopped.set()
@@ -319,7 +350,9 @@ class PluginRunner:
         )
         self._process = proc
         proc.start()
-        self._generation = _Generation(proc, self._request_queue, self._response_queue)
+        self._generation = _Generation(
+            proc, self._request_queue, self._response_queue, self._circuit_breaker.record_failure
+        )
 
     async def call(self, method_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Вызвать метод плагина через IPC (вызовы могут идти параллельно).
@@ -333,13 +366,23 @@ class PluginRunner:
             PluginTimeoutError: плагин не ответил за timeout_sec.
             PluginCallError: плагин вернул ошибку.
         """
-        if self._circuit_breaker.is_open():
-            raise PluginDisabledError("Plugin circuit breaker is open")
-
         request_id = uuid.uuid4().hex
-        # JSON-валидация payload — предотвращает передачу произвольных pickle-объектов.
+        # JSON-валидация payload до breaker'а — предотвращает передачу pickle-объектов
+        # и не тратит пробный вызов half-open на заведомо невалидный payload.
         request_json = json.dumps({"id": request_id, "method": method_name, "payload": payload})
 
+        if self._circuit_breaker.is_open():
+            raise PluginDisabledError("Plugin circuit breaker is open")
+        probe = self._circuit_breaker.probing
+        try:
+            return await self._call(method_name, request_id, request_json)
+        finally:
+            # Проба, завершившаяся без record_success/record_failure (отмена задачи,
+            # сбой запуска процесса), не должна оставить breaker в half-open навсегда.
+            if probe and self._circuit_breaker.probing:
+                self._circuit_breaker.abort_probe()
+
+    async def _call(self, method_name: str, request_id: str, request_json: str) -> dict[str, Any]:
         self._ensure_running()
         generation = self._generation
         assert generation is not None and self._request_queue is not None
@@ -351,7 +394,7 @@ class PluginRunner:
         except TimeoutError:
             generation.forget(request_id)
             # Зависший вызов держит слот — процесс перезапускается; остальным
-            # вызовам этого процесса сообщается об ошибке, respawn ленивый.
+            # вызовам этого процесса — PluginRestartedError, respawn ленивый.
             self._kill("plugin restarted after timeout")
             self._circuit_breaker.record_failure()
             self._last_error = f"timeout in {method_name}"
@@ -359,6 +402,8 @@ class PluginRunner:
                 f"Plugin method {method_name!r} timed out after {self._config.timeout_sec}s"
             ) from None
 
+        if message.get("restarted"):
+            raise PluginRestartedError(message["error"])
         if "error" in message:
             self._circuit_breaker.record_failure()
             self._last_error = str(message["error"])[:500]
