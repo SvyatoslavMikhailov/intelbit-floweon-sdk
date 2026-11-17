@@ -16,7 +16,6 @@ env/
 
 # uv
 .uv/
-uv.lock
 
 # mypy
 .mypy_cache/
