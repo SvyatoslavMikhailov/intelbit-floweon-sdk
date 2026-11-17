@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # uv.lock is committed and CI runs `uv sync --locked`; Dependabot proposes
+  # lock bumps as PRs so they pass CI before reaching main (4-17-36).
+  # lockfile-only: never touch the consumer ranges in pyproject.toml.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    versioning-strategy: "lockfile-only"
+
+  # Actions are pinned by SHA; Dependabot bumps SHA + version comment.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
